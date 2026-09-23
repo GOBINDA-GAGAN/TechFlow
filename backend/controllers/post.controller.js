@@ -1,0 +1,407 @@
+const Post = require("../models/Post");
+const User = require("../models/User");
+const Comment = require("../models/Comment");
+const mongoose = require("mongoose");
+const uploadToCloudinary = require("../utils/cloudinaryUpload");
+const sanitizeHtml = require("sanitize-html");
+
+const ALLOWED_TAGS = [
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "p",
+  "ul",
+  "ol",
+  "li",
+  "strong",
+  "em",
+  "b",
+  "i",
+  "s",
+  "code",
+  "pre",
+  "blockquote",
+  "a",
+  "br",
+];
+
+const ALLOWED_ATTRIBUTES = {
+  a: ["href", "target", "rel"],
+};
+
+const sanitize = (html) =>
+  sanitizeHtml(html, {
+    allowedTags: ALLOWED_TAGS,
+    allowedAttributes: ALLOWED_ATTRIBUTES,
+  });
+
+exports.getPosts = async (req, res) => {
+  try {
+    const { q = "", tag = "" } = req.query;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.max(1, Math.min(50, parseInt(req.query.limit) || 10));
+    const sort = req.query.sort || "latest";
+
+    const skip = (page - 1) * limit;
+    const sortOption = sort === "oldest" ? { createdAt: 1 } : { createdAt: -1 };
+
+    let filter = {};
+
+    if (q.trim() !== "") {
+      // 👇 escape special regex characters from user input
+      const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      filter = {
+        $or: [
+          { title: { $regex: escaped, $options: "i" } },
+          { content: { $regex: escaped, $options: "i" } },
+        ],
+      };
+    }
+
+    if (tag.trim() !== "") {
+      filter.tags = tag.trim().toLowerCase();
+    }
+
+    const posts = await Post.find(filter)
+      .populate("author", "name username profile_img")
+      .sort(sortOption)
+      .skip(skip)
+      .limit(limit);
+
+    const totalPosts = await Post.countDocuments(filter);
+    const totalPages = Math.ceil(totalPosts / limit);
+
+    res.status(200).json({
+      success: true,
+      page,
+      limit,
+      totalPosts,
+      totalPages: totalPages,
+      posts,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getMyPosts = async (req, res) => {
+  try {
+    const { id } = req.user;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.max(1, Math.min(50, parseInt(req.query.limit) || 10));
+    const sort = req.query.sort || "latest";
+
+    const skip = (page - 1) * limit;
+
+    const sortOption = sort === "oldest" ? { createdAt: 1 } : { createdAt: -1 };
+
+    const posts = await Post.find({ author: id })
+      .populate("author", "name username profile_img")
+      .sort(sortOption)
+      .skip(skip)
+      .limit(limit);
+
+    const totalPosts = await Post.countDocuments({ author: id });
+    const totalPages = Math.ceil(totalPosts / limit);
+
+    res.status(200).json({
+      success: true,
+      page,
+      limit,
+      totalPosts,
+      totalPages: totalPages,
+      posts,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getUserPosts = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid user id" });
+    }
+
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.max(1, Math.min(50, parseInt(req.query.limit) || 10));
+    const sort = req.query.sort || "latest";
+
+    const skip = (page - 1) * limit;
+
+    const sortOption = sort === "oldest" ? { createdAt: 1 } : { createdAt: -1 };
+
+    const posts = await Post.find({ author: id })
+      .populate("author", "name username profile_img")
+      .sort(sortOption)
+      .skip(skip)
+      .limit(limit);
+
+    const totalPosts = await Post.countDocuments({ author: id });
+    const totalPages = Math.ceil(totalPosts / limit);
+
+    res.status(200).json({
+      success: true,
+      page,
+      limit,
+      totalPosts,
+      totalPages: totalPages,
+      posts,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getFollowingPosts = async (req, res) => {
+  try {
+    const { id } = req.user;
+
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.max(1, Math.min(50, parseInt(req.query.limit) || 10));
+    const sort = req.query.sort || "latest";
+    const skip = (page - 1) * limit;
+    const sortOption = sort === "oldest" ? { createdAt: 1 } : { createdAt: -1 };
+
+    const me = await User.findById(id).select("following");
+
+    if (!me.following.length) {
+      return res.status(200).json({
+        success: true,
+        posts: [],
+        totalPages: 0,
+        totalPosts: 0,
+        page,
+      });
+    }
+
+    const filter = { author: { $in: me.following } };
+
+    const [posts, totalPosts] = await Promise.all([
+      Post.find(filter)
+        .populate("author", "name username profile_img")
+        .sort(sortOption)
+        .skip(skip)
+        .limit(limit),
+      Post.countDocuments(filter),
+    ]);
+
+    const totalPages = Math.ceil(totalPosts / limit);
+
+    res.status(200).json({
+      success: true,
+      page,
+      limit,
+      totalPosts,
+      totalPages: totalPages,
+      posts,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getPost = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid post id" });
+    }
+
+    const post = await Post.findByIdAndUpdate(
+      id,
+      { $inc: { views: 1 } },
+      { new: true },
+    ).populate("author", "name username profile_img");
+    if (!post) {
+      return res.status(404).json({ message: "Post not found" });
+    }
+
+    res.status(200).json({ success: true, post });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.create = async (req, res) => {
+    try {
+        const { title, content, tags } = req.body;
+
+        console.log(title, content, tags);
+
+        const userId = req.user.id;
+
+        if (!title || !content) {
+            return res.status(400).json({
+                message: "All fields are required",
+            });
+        }
+
+        const parsedTags = tags
+            ? tags
+                  .split(",")
+                  .map((t) => t.trim().toLowerCase())
+                  .filter(Boolean)
+                  .slice(0, 5)
+            : [];
+
+        let img = "";
+
+        if (req.file) {
+            console.log("Uploading image to Cloudinary...");
+
+            const result = await uploadToCloudinary(
+                req.file.buffer,
+                "posts"
+            );
+
+            console.log("Cloudinary upload successful");
+            console.log(result);
+
+            img = result.secure_url;
+        }
+
+        const post = await Post.create({
+            title,
+            content: sanitize(content),
+            img,
+            tags: parsedTags,
+            author: userId,
+        });
+
+        return res.status(201).json({
+            success: true,
+            message: "Post Created successfully",
+            post,
+        });
+
+    } catch (error) {
+        console.error("CREATE POST ERROR:", error);
+        console.error("ERROR MESSAGE:", error.message);
+        console.error("ERROR HTTP CODE:", error.http_code);
+
+        return res.status(500).json({
+            success: false,
+            message: error.message,
+            http_code: error.http_code || null,
+        });
+    }
+};
+
+exports.edit = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid post id" });
+    }
+
+    const post = await Post.findById(id);
+
+    if (!post) {
+      return res.status(404).json({ message: "Post not found" });
+    }
+
+    const userId = req.user.id;
+
+    if (post.author.toString() !== userId) {
+      return res.status(403).json({ message: "User not authorized" });
+    }
+
+    if (req.body.title !== undefined) post.title = req.body.title;
+    if (req.body.content !== undefined)
+      post.content = sanitize(req.body.content);
+
+    if (req.body.tags !== undefined) {
+      post.tags = req.body.tags
+        .split(",")
+        .map((t) => t.trim().toLowerCase())
+        .filter(Boolean)
+        .slice(0, 5);
+    }
+
+    if (req.file) {
+      const result = await uploadToCloudinary(req.file.buffer, "posts");
+      post.img = result.secure_url;
+    }
+
+    await post.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Post Updated successfully",
+      post,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.like = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid post id" });
+    }
+
+    const post = await Post.findById(id);
+
+    if (!post) {
+      return res.status(404).json({ message: "Post not found" });
+    }
+
+    const userId = req.user.id;
+
+    if (post.likes.includes(userId)) {
+      post.likes.pull(userId);
+    } else {
+      post.likes.push(userId);
+    }
+
+    await post.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Post Updated successfully",
+      likes: post.likes.length,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.delete = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid post id" });
+    }
+    const userId = req.user.id;
+    const post = await Post.findById(id);
+
+    if (!post) {
+      return res.status(404).json({ message: "Post not found" });
+    }
+
+    if (post.author.toString() !== userId) {
+      return res.status(403).json({ message: "User not authorized" });
+    }
+
+    await post.deleteOne();
+
+    await Comment.deleteMany({ post: id });
+    await User.updateMany({ bookmarks: id }, { $pull: { bookmarks: id } });
+
+    res.status(200).json({ message: "Post deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
